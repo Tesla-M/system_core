@@ -65,7 +65,7 @@ char *locale;
 
 #define BATTERY_UNKNOWN_TIME    (2 * MSEC_PER_SEC)
 #define POWER_ON_KEY_TIME       (2 * MSEC_PER_SEC)
-#define UNPLUGGED_SHUTDOWN_TIME (1 * MSEC_PER_SEC)
+#define UNPLUGGED_SHUTDOWN_TIME (10 * MSEC_PER_SEC)
 
 #define BATTERY_FULL_THRESH     95
 
@@ -168,12 +168,148 @@ static struct animation battery_animation = {
     .capacity = 0,
 };
 
+#ifdef HEALTHD_ENABLE_TRICOLOR_LED
+
+#ifndef RED_LED_PATH
+#define RED_LED_PATH     "/sys/class/leds/red/brightness"
+#endif
+#ifndef GREEN_LED_PATH
+#define GREEN_LED_PATH   "/sys/class/leds/green/brightness"
+#endif
+#ifndef BLUE_LED_PATH
+#define BLUE_LED_PATH    "/sys/class/leds/blue/brightness"
+#endif
+
+enum {
+    RED_LED = 0x01 << 0,
+    GREEN_LED = 0x01 << 1,
+    BLUE_LED = 0x01 << 2,
+};
+
+struct led_ctl {
+    int color;
+    const char *path;
+};
+
+struct led_ctl leds[3] =
+    {{RED_LED, RED_LED_PATH},
+    {GREEN_LED, GREEN_LED_PATH},
+    {BLUE_LED, BLUE_LED_PATH}};
+
+struct soc_led_color_mapping {
+    int soc;
+    int color;
+};
+
+struct soc_led_color_mapping soc_leds[3] = {
+    {15, RED_LED},
+    {90, RED_LED | GREEN_LED},
+    {100, GREEN_LED},
+};
+#endif
+
 static struct charger charger_state;
 static struct healthd_config *healthd_config;
 static struct android::BatteryProperties *batt_prop;
 static int char_width;
 static int char_height;
 static bool minui_inited;
+
+#ifdef HEALTHD_ENABLE_TRICOLOR_LED
+static int set_tricolor_led(int on, int color)
+{
+    int fd, i;
+    char buffer[10];
+
+    for (i = 0; i < (int)ARRAY_SIZE(leds); i++) {
+        if ((color & leds[i].color) && (access(leds[i].path, R_OK | W_OK) == 0)) {
+            fd = open(leds[i].path, O_RDWR);
+            if (fd < 0) {
+                LOGE("Could not open led node %d\n", i);
+                continue;
+            }
+            if (on)
+                snprintf(buffer, sizeof(int), "%d\n", 255);
+            else
+                snprintf(buffer, sizeof(int), "%d\n", 0);
+
+            if (write(fd, buffer, strlen(buffer)) < 0)
+                LOGE("Could not write to led node\n");
+            close(fd);
+        }
+    }
+
+    return 0;
+}
+
+static int set_battery_soc_leds(int soc)
+{
+    int i, color;
+    static int old_color = 0;
+
+    for (i = 0; i < (int)ARRAY_SIZE(soc_leds); i++) {
+        if (soc <= soc_leds[i].soc)
+            break;
+    }
+    color = soc_leds[i].color;
+    if (old_color != color) {
+        set_tricolor_led(0, old_color);
+        set_tricolor_led(1, color);
+        old_color = color;
+        LOGV("soc = %d, set led color 0x%x\n", soc, soc_leds[i].color);
+    }
+
+    return 0;
+}
+#endif
+
+#ifdef HEALTHD_FORCE_BACKLIGHT_CONTROL
+
+#ifndef HEALTHD_BACKLIGHT_ON_LEVEL
+#define HEALTHD_BACKLIGHT_ON_LEVEL  150
+#endif
+
+static int set_backlight(bool on)
+{
+    int fd;
+    char buffer[10];
+
+    if (access(TW_BRIGHTNESS_PATH, R_OK | W_OK) != 0) {
+        LOGW("Backlight control not support\n");
+        return 0;
+    }
+
+    memset(buffer, '\0', sizeof(buffer));
+    fd = open(TW_BRIGHTNESS_PATH, O_RDWR);
+    if (fd < 0) {
+        LOGE("Could not open backlight node : %s\n", strerror(errno));
+        return 0;
+    }
+    LOGV("Enabling backlight\n");
+    snprintf(buffer, sizeof(buffer), "%d\n", on ? HEALTHD_BACKLIGHT_ON_LEVEL : 0);
+    if (write(fd, buffer,strlen(buffer)) < 0) {
+        LOGE("Could not write to backlight node : %s\n", strerror(errno));
+    }
+    close(fd);
+
+#ifdef TW_SECONDARY_BRIGHTNESS_PATH
+    if (access(TW_SECONDARY_BRIGHTNESS_PATH, R_OK | W_OK) != 0) {
+        LOGW("Secondary backlight control not support\n");
+    } else {
+        fd = open(TW_SECONDARY_BRIGHTNESS_PATH, O_RDWR);
+        if (fd < 0) {
+            LOGW("Could not open secondary backlight node : %s\n", strerror(errno));
+        } else {
+        LOGV("Enabling secondary backlight\n");
+        if (write(fd, buffer,strlen(buffer)) < 0)
+            LOGE("Could not write to secondary backlight node : %s\n", strerror(errno));
+        }
+        close(fd);
+    }
+#endif // TW_SECONDARY_BRIGHTNESS_PATH
+    return 0;
+}
+#endif // HEALTHD_FORCE_BACKLIGHT_CONTROL
 
 /* current time in milliseconds */
 static int64_t curr_time_ms(void)
@@ -268,9 +404,9 @@ static int draw_text(const char *str, int x, int y)
     return y + char_height;
 }
 
-static void android_green(void)
+static void android_white(void)
 {
-    gr_color(0xa4, 0xc6, 0x39, 255);
+    gr_color(255, 255, 255, 255);
 }
 
 /* returns the last y-offset of where the surface ends */
@@ -297,7 +433,7 @@ static void draw_unknown(struct charger *charger)
     if (charger->surf_unknown) {
         draw_surface_centered(charger, charger->surf_unknown);
     } else {
-        android_green();
+        android_white();
         y = draw_text("Charging!", -1, -1);
         draw_text("?\?/100", -1, y + 25);
     }
@@ -314,7 +450,30 @@ static void draw_battery(struct charger *charger)
              batt_anim->cur_frame, frame->min_capacity,
              frame->disp_time);
     }
-    healthd_board_mode_charger_draw_battery(batt_prop);
+}
+
+#define STR_LEN    64
+static void draw_capacity(struct charger *charger)
+{
+    char cap_str[STR_LEN];
+    int x, y;
+    int str_len_px;
+    int batt_height = 0;
+    // get height of battery image to draw text below
+    struct animation *batt_anim = charger->batt_anim;
+    struct frame *frame = &batt_anim->frames[batt_anim->cur_frame];
+    if (batt_anim->num_frames != 0) {
+        // nothing else should happen actually
+        batt_height = gr_get_height(frame->surface);
+    }
+
+    snprintf(cap_str, (STR_LEN - 1), "%d%%", charger->batt_anim->capacity);
+    str_len_px = gr_measure(cap_str);
+    x = (gr_fb_width() - str_len_px) / 2;
+    // draw it below the battery image
+    y = (gr_fb_height() + batt_height) / 2 + char_height * 2;
+    android_white();
+    gr_text(x, y, cap_str, 0);
 }
 
 static void redraw_screen(struct charger *charger)
@@ -324,10 +483,12 @@ static void redraw_screen(struct charger *charger)
     clear_screen();
 
     /* try to display *something* */
-    if (batt_anim->capacity < 0 || batt_anim->num_frames == 0)
+    if (batt_anim->capacity < 0 || batt_anim->num_frames == 0) {
         draw_unknown(charger);
-    else
+    } else {
         draw_battery(charger);
+        draw_capacity(charger);
+    }
     gr_flip();
 }
 
@@ -368,7 +529,6 @@ static void update_screen_state(struct charger *charger, int64_t now)
         gr_font_size(&char_width, &char_height);
 
 #ifndef CHARGER_DISABLE_INIT_BLANK
-        healthd_board_mode_charger_set_backlight(false);
         gr_fb_blank(true);
 #endif
         minui_inited = true;
@@ -378,7 +538,9 @@ static void update_screen_state(struct charger *charger, int64_t now)
     if (batt_anim->cur_cycle == batt_anim->num_cycles) {
         reset_animation(batt_anim);
         charger->next_screen_transition = -1;
-        healthd_board_mode_charger_set_backlight(false);
+#ifdef HEALTHD_FORCE_BACKLIGHT_CONTROL
+        set_backlight(false);
+#endif
         gr_fb_blank(true);
         LOGV("[%" PRId64 "] animation done\n", now);
         if (charger->charger_connected)
@@ -412,7 +574,9 @@ static void update_screen_state(struct charger *charger, int64_t now)
     /* unblank the screen on first cycle */
     if (batt_anim->cur_cycle == 0) {
         gr_fb_blank(false);
-        healthd_board_mode_charger_set_backlight(true);
+#ifdef HEALTHD_FORCE_BACKLIGHT_CONTROL
+        set_backlight(true);
+#endif
     }
 
     /* draw the new frame (@ cur_frame) */
@@ -548,13 +712,15 @@ static void process_key(struct charger *charger, int code, int64_t now)
                  * the animation is running, turn off the animation and request
                  * suspend.
                  */
-                if (!batt_anim->run) {
+                if (!charger->batt_anim->run) {
                     kick_animation(batt_anim);
                     request_suspend(false);
                 } else {
-                    reset_animation(batt_anim);
+                    reset_animation(charger->batt_anim);
                     charger->next_screen_transition = -1;
-                    healthd_board_mode_charger_set_backlight(false);
+#ifdef HEALTHD_FORCE_BACKLIGHT_CONTROL
+                    set_backlight(false);
+#endif
                     gr_fb_blank(true);
                     if (charger->charger_connected)
                         request_suspend(true);
@@ -576,10 +742,24 @@ static void handle_input_state(struct charger *charger, int64_t now)
 
 static void handle_power_supply_state(struct charger *charger, int64_t now)
 {
+#ifdef HEALTHD_ENABLE_TRICOLOR_LED
+    static int old_soc = 0;
+    int soc = 0;
+#endif
+
     if (!charger->have_battery_state)
         return;
 
-    healthd_board_mode_charger_battery_update(batt_prop);
+#ifdef HEALTHD_ENABLE_TRICOLOR_LED
+    if (batt_prop && batt_prop->batteryLevel >= 0) {
+        soc = batt_prop->batteryLevel;
+    }
+
+    if (old_soc != soc) {
+        old_soc = soc;
+        set_battery_soc_leds(soc);
+    }
+#endif
 
     if (!charger->charger_connected) {
 
@@ -698,8 +878,6 @@ void healthd_mode_charger_init(struct healthd_config* config)
     dump_last_kmsg();
 
     LOGW("--------------- STARTING CHARGER MODE ---------------\n");
-
-    healthd_board_mode_charger_init();
 
     ret = ev_init(input_callback, charger);
     if (!ret) {

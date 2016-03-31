@@ -25,6 +25,31 @@ LOCAL_UNSTRIPPED_PATH := $(TARGET_ROOT_OUT_SBIN_UNSTRIPPED)
 
 LOCAL_CFLAGS := -D__STDC_LIMIT_MACROS -Werror
 
+HEALTHD_PATH := \
+    RED_LED_PATH \
+    GREEN_LED_PATH \
+    BLUE_LED_PATH \
+    TW_BRIGHTNESS_PATH \
+    TW_SECONDARY_BRIGHTNESS_PATH
+
+$(foreach healthd_charger_define,$(HEALTHD_PATH), \
+  $(if $($(healthd_charger_define)), \
+    $(eval LOCAL_CFLAGS += -D$(healthd_charger_define)=\"$($(healthd_charger_define))\") \
+  ) \
+)
+
+ifeq ($(strip $(HEALTHD_FORCE_BACKLIGHT_CONTROL)),true)
+LOCAL_CFLAGS += -DHEALTHD_FORCE_BACKLIGHT_CONTROL
+endif
+
+ifeq ($(strip $(HEALTHD_ENABLE_TRICOLOR_LED)),true)
+LOCAL_CFLAGS += -DHEALTHD_ENABLE_TRICOLOR_LED
+endif
+
+ifneq ($(strip $(HEALTHD_BACKLIGHT_ON_LEVEL)),)
+LOCAL_CFLAGS += -DHEALTHD_BACKLIGHT_ON_LEVEL=$(HEALTHD_BACKLIGHT_ON_LEVEL)
+endif
+
 ifeq ($(strip $(BOARD_CHARGER_DISABLE_INIT_BLANK)),true)
 LOCAL_CFLAGS += -DCHARGER_DISABLE_INIT_BLANK
 endif
@@ -64,8 +89,13 @@ endef
 
 _img_modules :=
 _images :=
+ifneq ($(BOARD_CHARGER_IMG_PATH),)
+$(foreach _img, $(call find-subdir-subdir-files, ../../../$(BOARD_CHARGER_IMG_PATH), "*.png"), \
+  $(eval $(call _add-charger-image,$(_img))))
+else
 $(foreach _img, $(call find-subdir-subdir-files, "images", "*.png"), \
   $(eval $(call _add-charger-image,$(_img))))
+endif
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := charger_res_images
