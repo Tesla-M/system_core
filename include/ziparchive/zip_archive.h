@@ -33,33 +33,17 @@ enum {
   kCompressDeflated   = 8,        // standard deflate
 };
 
-struct ZipString {
+struct ZipEntryName {
   const uint8_t* name;
   uint16_t name_length;
 
-  ZipString() {}
+  ZipEntryName() {}
 
   /*
    * entry_name has to be an c-style string with only ASCII characters.
    */
-  explicit ZipString(const char* entry_name)
+  explicit ZipEntryName(const char* entry_name)
       : name(reinterpret_cast<const uint8_t*>(entry_name)), name_length(strlen(entry_name)) {}
-
-  bool operator==(const ZipString& rhs) const {
-    return name && (name_length == rhs.name_length) &&
-        (memcmp(name, rhs.name, name_length) == 0);
-  }
-
-  bool StartsWith(const ZipString& prefix) const {
-    return name && (name_length >= prefix.name_length) &&
-        (memcmp(name, prefix.name, prefix.name_length) == 0);
-  }
-
-  bool EndsWith(const ZipString& suffix) const {
-    return name && (name_length >= suffix.name_length) &&
-        (memcmp(name + name_length - suffix.name_length, suffix.name,
-                suffix.name_length) == 0);
-  }
 };
 
 /*
@@ -152,7 +136,7 @@ void CloseArchive(ZipArchiveHandle handle);
  * and length, a call to VerifyCrcAndLengths must be made after entry data
  * has been processed.
  */
-int32_t FindEntry(const ZipArchiveHandle handle, const ZipString& entryName,
+int32_t FindEntry(const ZipArchiveHandle handle, const ZipEntryName& entryName,
                   ZipEntry* data);
 
 /*
@@ -163,14 +147,15 @@ int32_t FindEntry(const ZipArchiveHandle handle, const ZipString& entryName,
  * calls to Next. All calls to StartIteration must be matched by a call to
  * EndIteration to free any allocated memory.
  *
- * This method also accepts optional prefix and suffix to restrict iteration to
- * entry names that start with |optional_prefix| or end with |optional_suffix|.
+ * This method also accepts an optional prefix to restrict iteration to
+ * entry names that start with |optional_prefix|.
  *
  * Returns 0 on success and negative values on failure.
  */
 int32_t StartIteration(ZipArchiveHandle handle, void** cookie_ptr,
-                       const ZipString* optional_prefix,
-                       const ZipString* optional_suffix);
+                       const ZipEntryName* optional_prefix,
+                       // TODO: Remove the default parameter.
+                       const ZipEntryName* optional_suffix = NULL);
 
 /*
  * Advance to the next element in the zipfile in iteration order.
@@ -178,7 +163,7 @@ int32_t StartIteration(ZipArchiveHandle handle, void** cookie_ptr,
  * Returns 0 on success, -1 if there are no more elements in this
  * archive and lower negative values on failure.
  */
-int32_t Next(void* cookie, ZipEntry* data, ZipString* name);
+int32_t Next(void* cookie, ZipEntry* data, ZipEntryName *name);
 
 /*
  * End iteration over all entries of a zip file and frees the memory allocated
